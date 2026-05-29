@@ -1,0 +1,128 @@
+# Hospital Dashboard AI - Docker Compose
+# Despliegue on-premise completo
+
+version: '3.8'
+
+services:
+  # ============================================
+  # BASE DE DATOS: PostgreSQL
+  # ============================================
+  db:
+    image: postgres:15-alpine
+    container_name: hospital-dashboard-db
+    environment:
+      POSTGRES_USER: hospital
+      POSTGRES_PASSWORD: hospital123
+      POSTGRES_DB: hospital
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ../database/seed_data.sql:/docker-entrypoint-initdb.d/02-data.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hospital -d hospital"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hospital-net
+    restart: unless-stopped
+
+  # ============================================
+  # CACHE: Redis
+  # ============================================
+  redis:
+    image: redis:7-alpine
+    container_name: hospital-dashboard-redis
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - hospital-net
+    restart: unless-stopped
+
+  # ============================================
+  # BACKEND: FastAPI
+  # ============================================
+  backend:
+    build:
+      context: ../backend
+      dockerfile: ../docker/Dockerfile.backend
+    container_name: hospital-dashboard-backend
+    environment:
+      DATABASE_URL: postgresql://hospital:hospital123@db:5432/hospital
+      REDIS_URL: redis://redis:6379/0
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      API_ENV: production
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - hospital-net
+    restart: unless-stopped
+    volumes:
+      - ../backend:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ============================================
+  # FRONTEND: Streamlit
+  # ============================================
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: ../docker/Dockerfile.frontend
+    container_name: hospital-dashboard-frontend
+    environment:
+      API_URL: http://backend:8000
+      STREAMLIT_SERVER_PORT: 8501
+      STREAMLIT_SERVER_HEADLESS: "true"
+    ports:
+      - "8501:8501"
+    depends_on:
+      - backend
+    networks:
+      - hospital-net
+    restart: unless-stopped
+    volumes:
+      - ../frontend:/app
+
+  # ============================================
+  # ADMINER: Gestor de BD Web (opcional)
+  # ============================================
+  adminer:
+    image: adminer:latest
+    container_name: hospital-dashboard-adminer
+    ports:
+      - "8080:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: db
+    depends_on:
+      - db
+    networks:
+      - hospital-net
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  hospital-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
