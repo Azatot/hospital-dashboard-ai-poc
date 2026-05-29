@@ -64,9 +64,7 @@ CREATE TABLE IF NOT EXISTS consultas_externas (
     fecha_atencion TIMESTAMP,
     estado VARCHAR(30), -- 'ATENDIDA', 'NO_SHOW', 'CANCELADA', 'PENDIENTE'
     tipo VARCHAR(30), -- 'PRIMERA_VISITA', 'REVISIT', 'CONTROL'
-    tiempo_espera_dias INTEGER GENERATED ALWAYS AS (
-        EXTRACT(DAY FROM (fecha_cita - fecha_registro))
-    ) STORED
+    tiempo_espera_dias INTEGER
 );
 
 -- Tabla de ocupación de camas

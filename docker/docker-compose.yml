@@ -1,8 +1,6 @@
 # Hospital Dashboard AI - Docker Compose
 # Despliegue on-premise completo
 
-version: '3.8'
-
 services:
   # ============================================
   # BASE DE DATOS: PostgreSQL
@@ -17,7 +15,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ../database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-      - ../database/seed_data.sql:/docker-entrypoint-initdb.d/02-data.sql:ro
+      - ./seed_data.sql:/docker-entrypoint-initdb.d/02-data.sql:ro
     ports:
       - "5432:5432"
     healthcheck:
@@ -59,6 +57,7 @@ services:
     container_name: hospital-dashboard-backend
     environment:
       DATABASE_URL: postgresql://hospital:hospital123@db:5432/hospital
+      DB_ENGINE: ${DB_ENGINE:-postgres}
       REDIS_URL: redis://redis:6379/0
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       API_ENV: production

@@ -223,6 +223,35 @@ def generar_consulta(id_consulta, paciente_id):
         'tipo': random.choice(['PRIMERA_VISITA', 'REVISIT', 'CONTROL'])
     }
 
+def generar_camas(num_camas=120):
+    camas = []
+    servicios = ['UCI', 'Medicina Interna', 'Pediatría', 'Cirugía', 'Urgencias']
+    
+    for i in range(1, num_camas + 1):
+        servicio = servicios[(i - 1) % len(servicios)]
+        r = random.random()
+        if r < 0.65:
+            estado = 'OCUPADA'
+            paciente_id = random.randint(1, NUM_PACIENTES)
+            fecha_ocu = (FECHA_FIN - datetime.timedelta(days=random.randint(1, 10))).date().isoformat()
+        elif r < 0.90:
+            estado = 'LIBRE'
+            paciente_id = None
+            fecha_ocu = None
+        else:
+            estado = 'LIMPIEZA'
+            paciente_id = None
+            fecha_ocu = None
+            
+        camas.append({
+            'numero': 100 + i,
+            'servicio': servicio,
+            'estado': estado,
+            'paciente_id': paciente_id,
+            'fecha_ocupacion': fecha_ocu
+        })
+    return camas
+
 def generar_todos_los_datos():
     """Genera el dataset completo"""
     print("Generando datos sintéticos del hospital...")
@@ -248,12 +277,17 @@ def generar_todos_los_datos():
     print(f"Generando {NUM_CONSULTAS} consultas externas...")
     consultas = [generar_consulta(i+1, random.randint(1, NUM_PACIENTES)) for i in range(NUM_CONSULTAS)]
     
+    # Camas (NEW)
+    print("Generando 120 camas...")
+    camas = generar_camas(120)
+    
     return {
         'quirofanos': quirofanos,
         'pacientes': pacientes,
         'urgencias': urgencias,
         'cirugias': cirugias,
-        'consultas': consultas
+        'consultas': consultas,
+        'camas': camas
     }
 
 def exportar_a_sql(datos, archivo_salida):
@@ -290,6 +324,12 @@ def exportar_a_sql(datos, archivo_salida):
             fecha_atencion = f"'{c['fecha_atencion']}'" if c['fecha_atencion'] else 'NULL'
             medico_clean = c['medico'].replace("'", "''")
             f.write(f"INSERT INTO consultas_externas (id, paciente_id, especialidad, medico, fecha_cita, fecha_atencion, estado, tipo) VALUES ({c['id']}, {c['paciente_id']}, '{c['especialidad']}', '{medico_clean}', '{c['fecha_cita']}', {fecha_atencion}, '{c['estado']}', '{c['tipo']}');\n")
+            
+        f.write("\n-- Insert Camas\n")
+        for c in datos.get('camas', []):
+            paciente_id = c['paciente_id'] if c['paciente_id'] else 'NULL'
+            fecha_ocu = f"'{c['fecha_ocupacion']}'" if c['fecha_ocupacion'] else 'NULL'
+            f.write(f"INSERT INTO camas (numero, servicio, estado, paciente_id, fecha_ocupacion) VALUES ({c['numero']}, '{c['servicio']}', '{c['estado']}', {paciente_id}, {fecha_ocu});\n")
     
     
     print(f"Datos exportados a {archivo_salida}")

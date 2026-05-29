@@ -5,11 +5,12 @@ API REST para generar gráficos, KPIs y métricas en tiempo real
 from fastapi import FastAPI, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-import asyncpg
 import os
+import random
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 
+from db_connector import db_client, DB_ENGINE
 from ai_generator import generate_chart_from_query, generator
 from models import (
     NaturalLanguageRequest, AIChartResponse, ChartConfiguration, 
@@ -17,17 +18,10 @@ from models import (
     KPIRequest, KPIResponse, DashboardMetrics
 )
 
-# Configuración de DB
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://hospital:hospital@db:5432/hospital")
-
-# Conexión a base de datos
+# Conexión a base de datos (se mantiene para compatibilidad de firmas)
 async def get_db():
-    """Obtiene conexión a base de datos"""
-    conn = await asyncpg.connect(DATABASE_URL)
-    try:
-        yield conn
-    finally:
-        await conn.close()
+    """Obtiene el cliente de base de datos unificado"""
+    yield db_client
 
 # Lifespan para startup/shutdown
 @asynccontextmanager
@@ -82,6 +76,13 @@ async def health_check():
         "version": "1.0.0"
     }
 
+@app.get("/api/v1/config")
+async def get_config():
+    """Obtiene configuraciones activas del backend"""
+    return {
+        "db_engine": DB_ENGINE
+    }
+
 # =============================================================================
 # GENERACIÓN DE GRÁFICOS CON IA
 # =============================================================================
@@ -102,14 +103,13 @@ async def generate_chart(request: NaturalLanguageRequest):
         config = await generate_chart_from_query(request.query)
         
         # Ejecutar la consulta SQL para obtener datos reales
-        conn = await asyncpg.connect(DATABASE_URL)
-        try:
-            rows = await conn.fetch(config.query_sql)
-            
-            # Transformar a formato de ChartData
-            labels = [str(row[config.x_axis or list(row.keys())[0]]) for row in rows]
-            datasets = []
-            
+        rows = await db_client.execute_query(config.query_sql)
+        
+        # Transformar a formato de ChartData
+        labels = [str(row[config.x_axis or list(row.keys())[0]]) for row in rows] if rows else []
+        datasets = []
+        
+        if rows:
             if config.y_axis:
                 values = [row[config.y_axis] for row in rows]
                 datasets.append({
@@ -121,7 +121,7 @@ async def generate_chart(request: NaturalLanguageRequest):
                 })
             else:
                 # Si no hay y_axis específico, usar todas las columnas numéricas
-                for key in rows[0].keys() if rows else []:
+                for key in rows[0].keys():
                     if isinstance(rows[0][key], (int, float)) and key != config.x_axis:
                         values = [row[key] for row in rows]
                         datasets.append({
@@ -130,38 +130,35 @@ async def generate_chart(request: NaturalLanguageRequest):
                             "backgroundColor": f"rgba({random.randint(50, 200)}, {random.randint(50, 200)}, {random.randint(50, 200)}, 0.5)",
                             "borderWidth": 1
                         })
-            
-            chart_data = ChartData(
-                labels=labels,
-                datasets=datasets,
-                metadata={
-                    "total_rows": len(rows),
-                    "sql_executed": config.query_sql,
-                    "execution_time_ms": 0  # Se podría medir
-                }
-            )
-            
-            # Generar explicación
-            explanation = f"""
-            Este gráfico muestra {config.title.lower()}.
-            Datos obtenidos de la tabla de {config.area.value}.
-            El análisis cubre el período: {config.time_range.value}.
-            """
-            
-            # Sugerencias relacionadas
-            suggestions = generate_suggestions(config.area, request.query)
-            
-            return AIChartResponse(
-                success=True,
-                configuration=config,
-                data=chart_data,
-                explanation=explanation.strip(),
-                confidence_score=0.85 if config.query_sql != "SELECT 1" else 0.6,
-                suggestions=suggestions
-            )
-            
-        finally:
-            await conn.close()
+        
+        chart_data = ChartData(
+            labels=labels,
+            datasets=datasets,
+            metadata={
+                "total_rows": len(rows),
+                "sql_executed": config.query_sql,
+                "execution_time_ms": 0  # Se podría medir
+            }
+        )
+        
+        # Generar explicación
+        explanation = f"""
+        Este gráfico muestra {config.title.lower()}.
+        Datos obtenidos de la tabla de {config.area.value}.
+        El análisis cubre el período: {config.time_range.value}.
+        """
+        
+        # Sugerencias relacionadas
+        suggestions = generate_suggestions(config.area, request.query)
+        
+        return AIChartResponse(
+            success=True,
+            configuration=config,
+            data=chart_data,
+            explanation=explanation.strip(),
+            confidence_score=0.85 if config.query_sql != "SELECT 1" else 0.6,
+            suggestions=suggestions
+        )
             
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generando gráfico: {str(e)}")
@@ -172,16 +169,12 @@ async def execute_sql(config: ChartConfiguration):
     Ejecuta una consulta SQL personalizada y devuelve datos para el gráfico.
     """
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        try:
-            rows = await conn.fetch(config.query_sql)
-            return {
-                "success": True,
-                "data": [dict(row) for row in rows],
-                "row_count": len(rows)
-            }
-        finally:
-            await conn.close()
+        rows = await db_client.execute_query(config.query_sql)
+        return {
+            "success": True,
+            "data": rows,
+            "row_count": len(rows)
+        }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error en SQL: {str(e)}")
 
@@ -202,51 +195,110 @@ async def get_kpis(
         kpis = {}
         
         if area == Area.URGENCIAS:
-            # Total urgencias
-            row = await conn.fetchrow("""
-                SELECT COUNT(*) as total,
-                       AVG(EXTRACT(EPOCH FROM (fecha_atencion_medica - fecha_entrada))/60) as espera_media,
-                       COUNT(CASE WHEN destino = 'FUGA' THEN 1 END) as fugas
-                FROM urgencias 
-                WHERE DATE(fecha_entrada) = CURRENT_DATE
-            """)
-            if row:
+            if DB_ENGINE == "mssql":
+                query = """
+                    SELECT COUNT(*) as total,
+                           AVG(DATEDIFF(minute, fecha_entrada, fecha_atencion_medica)) as espera_media,
+                           COUNT(CASE WHEN destino = 'FUGA' THEN 1 END) as fugas
+                    FROM urgencias 
+                    WHERE CAST(fecha_entrada AS DATE) = CAST(GETDATE() AS DATE)
+                """
+            elif DB_ENGINE == "oracle":
+                query = """
+                    SELECT COUNT(*) as total,
+                           AVG((fecha_atencion_medica - fecha_entrada)*24*60) as espera_media,
+                           COUNT(CASE WHEN destino = 'FUGA' THEN 1 END) as fugas
+                    FROM urgencias 
+                    WHERE TRUNC(fecha_entrada) = TRUNC(SYSDATE)
+                """
+            else:  # postgres
+                query = """
+                    SELECT COUNT(*) as total,
+                           AVG(EXTRACT(EPOCH FROM (fecha_atencion_medica - fecha_entrada))/60) as espera_media,
+                           COUNT(CASE WHEN destino = 'FUGA' THEN 1 END) as fugas
+                    FROM urgencias 
+                    WHERE DATE(fecha_entrada) = CURRENT_DATE
+                """
+            
+            rows = await conn.execute_query(query)
+            if rows:
+                row = rows[0]
                 kpis = {
-                    "total_urgencias_hoy": row['total'],
+                    "total_urgencias_hoy": row['total'] or 0,
                     "espera_media_minutos": round(row['espera_media'] or 0, 1),
-                    "tasa_fugas": f"{round((row['fugas'] / row['total'] * 100) if row['total'] > 0 else 0, 1)}%"
+                    "tasa_fugas": f"{round((row['fugas'] / row['total'] * 100) if row['total'] and row['total'] > 0 else 0, 1)}%"
                 }
                 
         elif area == Area.QUIROFANOS:
-            row = await conn.fetchrow("""
-                SELECT COUNT(*) as total,
-                       COUNT(CASE WHEN estado = 'COMPLETADA' THEN 1 END) as completadas,
-                       COUNT(CASE WHEN estado = 'CANCELADA' THEN 1 END) as canceladas
-                FROM cirugias 
-                WHERE fecha_programada = CURRENT_DATE
-            """)
-            if row:
+            if DB_ENGINE == "mssql":
+                query = """
+                    SELECT COUNT(*) as total,
+                           COUNT(CASE WHEN estado = 'COMPLETADA' THEN 1 END) as completadas,
+                           COUNT(CASE WHEN estado = 'CANCELADA' THEN 1 END) as canceladas
+                    FROM cirugias 
+                    WHERE fecha_programada = CAST(GETDATE() AS DATE)
+                """
+            elif DB_ENGINE == "oracle":
+                query = """
+                    SELECT COUNT(*) as total,
+                           COUNT(CASE WHEN estado = 'COMPLETADA' THEN 1 END) as completadas,
+                           COUNT(CASE WHEN estado = 'CANCELADA' THEN 1 END) as canceladas
+                    FROM cirugias 
+                    WHERE TRUNC(fecha_programada) = TRUNC(SYSDATE)
+                """
+            else:  # postgres
+                query = """
+                    SELECT COUNT(*) as total,
+                           COUNT(CASE WHEN estado = 'COMPLETADA' THEN 1 END) as completadas,
+                           COUNT(CASE WHEN estado = 'CANCELADA' THEN 1 END) as canceladas
+                    FROM cirugias 
+                    WHERE fecha_programada = CURRENT_DATE
+                """
+            
+            rows = await conn.execute_query(query)
+            if rows:
+                row = rows[0]
                 kpis = {
-                    "cirugias_programadas_hoy": row['total'],
-                    "cirugias_completadas": row['completadas'],
-                    "cirugias_canceladas": row['canceladas'],
-                    "tasa_completitud": f"{round((row['completadas'] / row['total'] * 100) if row['total'] > 0 else 0, 1)}%"
+                    "cirugias_programadas_hoy": row['total'] or 0,
+                    "cirugias_completadas": row['completadas'] or 0,
+                    "cirugias_canceladas": row['canceladas'] or 0,
+                    "tasa_completitud": f"{round((row['completadas'] / row['total'] * 100) if row['total'] and row['total'] > 0 else 0, 1)}%"
                 }
                 
         elif area == Area.CONSULTAS_EXTERNAS:
-            row = await conn.fetchrow("""
-                SELECT COUNT(*) as total,
-                       COUNT(CASE WHEN estado = 'ATENDIDA' THEN 1 END) as atendidas,
-                       COUNT(CASE WHEN estado = 'NO_SHOW' THEN 1 END) as no_show
-                FROM consultas_externas 
-                WHERE DATE(fecha_cita) = CURRENT_DATE
-            """)
-            if row:
+            if DB_ENGINE == "mssql":
+                query = """
+                    SELECT COUNT(*) as total,
+                           COUNT(CASE WHEN estado = 'ATENDIDA' THEN 1 END) as atendidas,
+                           COUNT(CASE WHEN estado = 'NO_SHOW' THEN 1 END) as no_show
+                    FROM consultas_externas 
+                    WHERE CAST(fecha_cita AS DATE) = CAST(GETDATE() AS DATE)
+                """
+            elif DB_ENGINE == "oracle":
+                query = """
+                    SELECT COUNT(*) as total,
+                           COUNT(CASE WHEN estado = 'ATENDIDA' THEN 1 END) as atendidas,
+                           COUNT(CASE WHEN estado = 'NO_SHOW' THEN 1 END) as no_show
+                    FROM consultas_externas 
+                    WHERE TRUNC(fecha_cita) = TRUNC(SYSDATE)
+                """
+            else:  # postgres
+                query = """
+                    SELECT COUNT(*) as total,
+                           COUNT(CASE WHEN estado = 'ATENDIDA' THEN 1 END) as atendidas,
+                           COUNT(CASE WHEN estado = 'NO_SHOW' THEN 1 END) as no_show
+                    FROM consultas_externas 
+                    WHERE DATE(fecha_cita) = CURRENT_DATE
+                """
+            
+            rows = await conn.execute_query(query)
+            if rows:
+                row = rows[0]
                 kpis = {
-                    "citas_programadas_hoy": row['total'],
-                    "citas_atendidas": row['atendidas'],
-                    "no_show": row['no_show'],
-                    "tasa_asistencia": f"{round((row['atendidas'] / row['total'] * 100) if row['total'] > 0 else 0, 1)}%"
+                    "citas_programadas_hoy": row['total'] or 0,
+                    "citas_atendidas": row['atendidas'] or 0,
+                    "no_show": row['no_show'] or 0,
+                    "tasa_asistencia": f"{round((row['atendidas'] / row['total'] * 100) if row['total'] and row['total'] > 0 else 0, 1)}%"
                 }
         
         return KPIResponse(
@@ -267,38 +319,95 @@ async def get_realtime_metrics(conn=Depends(get_db)):
     """
     try:
         # Urgencias hoy
-        urgencias = await conn.fetchrow("""
-            SELECT COUNT(*) as total,
-                   AVG(EXTRACT(EPOCH FROM (fecha_atencion_medica - fecha_entrada))/60) as espera
-            FROM urgencias 
-            WHERE DATE(fecha_entrada) = CURRENT_DATE
-        """)
+        if DB_ENGINE == "mssql":
+            q_urgencias = """
+                SELECT COUNT(*) as total,
+                       AVG(DATEDIFF(minute, fecha_entrada, fecha_atencion_medica)) as espera
+                FROM urgencias 
+                WHERE CAST(fecha_entrada AS DATE) = CAST(GETDATE() AS DATE)
+            """
+        elif DB_ENGINE == "oracle":
+            q_urgencias = """
+                SELECT COUNT(*) as total,
+                       AVG((fecha_atencion_medica - fecha_entrada)*24*60) as espera
+                FROM urgencias 
+                WHERE TRUNC(fecha_entrada) = TRUNC(SYSDATE)
+            """
+        else:  # postgres
+            q_urgencias = """
+                SELECT COUNT(*) as total,
+                       AVG(EXTRACT(EPOCH FROM (fecha_atencion_medica - fecha_entrada))/60) as espera
+                FROM urgencias 
+                WHERE DATE(fecha_entrada) = CURRENT_DATE
+            """
         
         # Cirugías hoy
-        cirugias = await conn.fetchrow("""
-            SELECT COUNT(*) as total,
-                   COUNT(CASE WHEN estado = 'COMPLETADA' THEN 1 END) as completadas
-            FROM cirugias 
-            WHERE fecha_programada = CURRENT_DATE
-        """)
-        
+        if DB_ENGINE == "mssql":
+            q_cirugias = """
+                SELECT COUNT(*) as total,
+                       COUNT(CASE WHEN estado = 'COMPLETADA' THEN 1 END) as completadas
+                FROM cirugias 
+                WHERE fecha_programada = CAST(GETDATE() AS DATE)
+            """
+        elif DB_ENGINE == "oracle":
+            q_cirugias = """
+                SELECT COUNT(*) as total,
+                       COUNT(CASE WHEN estado = 'COMPLETADA' THEN 1 END) as completadas
+                FROM cirugias 
+                WHERE TRUNC(fecha_programada) = TRUNC(SYSDATE)
+            """
+        else:  # postgres
+            q_cirugias = """
+                SELECT COUNT(*) as total,
+                       COUNT(CASE WHEN estado = 'COMPLETADA' THEN 1 END) as completadas
+                FROM cirugias 
+                WHERE fecha_programada = CURRENT_DATE
+            """
+            
         # Consultas
-        consultas = await conn.fetchrow("""
-            SELECT COUNT(*) as total,
-                   COUNT(CASE WHEN estado = 'ATENDIDA' THEN 1 END) as atendidas,
-                   COUNT(CASE WHEN estado = 'NO_SHOW' THEN 1 END) as no_show
-            FROM consultas_externas 
-            WHERE DATE(fecha_cita) = CURRENT_DATE
-        """)
+        if DB_ENGINE == "mssql":
+            q_consultas = """
+                SELECT COUNT(*) as total,
+                       COUNT(CASE WHEN estado = 'ATENDIDA' THEN 1 END) as atendidas,
+                       COUNT(CASE WHEN estado = 'NO_SHOW' THEN 1 END) as no_show
+                FROM consultas_externas 
+                WHERE CAST(fecha_cita AS DATE) = CAST(GETDATE() AS DATE)
+            """
+        elif DB_ENGINE == "oracle":
+            q_consultas = """
+                SELECT COUNT(*) as total,
+                       COUNT(CASE WHEN estado = 'ATENDIDA' THEN 1 END) as atendidas,
+                       COUNT(CASE WHEN estado = 'NO_SHOW' THEN 1 END) as no_show
+                FROM consultas_externas 
+                WHERE TRUNC(fecha_cita) = TRUNC(SYSDATE)
+            """
+        else:  # postgres
+            q_consultas = """
+                SELECT COUNT(*) as total,
+                       COUNT(CASE WHEN estado = 'ATENDIDA' THEN 1 END) as atendidas,
+                       COUNT(CASE WHEN estado = 'NO_SHOW' THEN 1 END) as no_show
+                FROM consultas_externas 
+                WHERE DATE(fecha_cita) = CURRENT_DATE
+            """
+            
+        # Ejecutar todas
+        urgencias_rows = await conn.execute_query(q_urgencias)
+        cirugias_rows = await conn.execute_query(q_cirugias)
+        consultas_rows = await conn.execute_query(q_consultas)
         
         # Ocupación camas
-        camas = await conn.fetchrow("""
+        camas_rows = await conn.execute_query("""
             SELECT COUNT(*) as total,
                    COUNT(CASE WHEN estado = 'OCUPADA' THEN 1 END) as ocupadas
             FROM camas
         """)
         
-        ocupacion_pct = round((camas['ocupadas'] / camas['total'] * 100) if camas['total'] > 0 else 0, 1)
+        urgencias = urgencias_rows[0] if urgencias_rows else {'total': 0, 'espera': 0}
+        cirugias = cirugias_rows[0] if cirugias_rows else {'total': 0, 'completadas': 0}
+        consultas = consultas_rows[0] if consultas_rows else {'total': 0, 'atendidas': 0, 'no_show': 0}
+        camas = camas_rows[0] if camas_rows else {'total': 0, 'ocupadas': 0}
+        
+        ocupacion_pct = round((camas['ocupadas'] / camas['total'] * 100) if camas['total'] and camas['total'] > 0 else 0, 1)
         
         return DashboardMetrics(
             timestamp=datetime.now(),
