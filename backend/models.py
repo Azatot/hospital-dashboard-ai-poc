@@ -58,8 +58,8 @@ class ChartConfiguration(BaseModel):
     x_axis: Optional[str] = None
     y_axis: Optional[str] = None
     group_by: Optional[str] = None
-    filters: Optional[Dict[str, Any]] = {}
-    aggregations: Optional[Dict[str, str]] = {}
+    filters: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    aggregations: Optional[Dict[str, str]] = Field(default_factory=dict)
     color_scheme: Optional[str] = "hospital"
     time_range: Optional[TimeRange] = TimeRange.LAST_7_DAYS
     
@@ -81,7 +81,7 @@ class ChartData(BaseModel):
     """Datos resultantes para el gráfico"""
     labels: List[str]
     datasets: List[Dict[str, Any]]
-    metadata: Optional[Dict[str, Any]] = {}
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 class AIChartResponse(BaseModel):
     """Respuesta completa del endpoint de generación IA"""
@@ -124,5 +124,5 @@ class UserSession(BaseModel):
     user_id: str
     role: str  # 'medico', 'enfermeria', 'gerencia', 'admin'
     preferred_areas: List[Area]
-    recent_queries: List[str] = []
-    saved_charts: List[str] = []
+    recent_queries: List[str] = Field(default_factory=list)
+    saved_charts: List[str] = Field(default_factory=list)

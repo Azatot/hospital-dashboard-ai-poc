@@ -3,19 +3,22 @@ Backend FastAPI para Hospital Dashboard con IA
 API REST para generar gráficos, KPIs y métricas en tiempo real
 """
 from fastapi import FastAPI, HTTPException, Depends, Query
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import os
 import random
-from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
+from decimal import Decimal
+from numbers import Number
+from typing import List
+from datetime import date, datetime
 
-from db_connector import db_client, DB_ENGINE
-from ai_generator import generate_chart_from_query, generator
+from db_connector import db_client, DB_ENGINE, UnsafeQueryError
+from ai_generator import generate_chart_from_query
 from models import (
     NaturalLanguageRequest, AIChartResponse, ChartConfiguration, 
-    ChartData, ChartType, Area, TimeRange,
-    KPIRequest, KPIResponse, DashboardMetrics
+    ChartData, Area, TimeRange,
+    KPIResponse, DashboardMetrics
 )
 
 # Conexión a base de datos (se mantiene para compatibilidad de firmas)
@@ -28,8 +31,11 @@ async def get_db():
 async def lifespan(app: FastAPI):
     """Eventos de inicio y cierre"""
     print("🚀 Iniciando Hospital Dashboard AI API...")
-    yield
-    print("👋 Cerrando conexiones...")
+    try:
+        yield
+    finally:
+        print("👋 Cerrando conexiones...")
+        await db_client.close()
 
 # Crear app FastAPI
 app = FastAPI(
@@ -39,11 +45,21 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+def _get_cors_origins() -> List[str]:
+    raw_origins = os.getenv(
+        "CORS_ALLOW_ORIGINS",
+        "http://localhost:8501,http://127.0.0.1:8501",
+    )
+    return [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+
+
+CORS_ALLOW_ORIGINS = _get_cors_origins()
+
 # CORS para permitir conexión desde frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # En producción, especificar dominios
-    allow_credentials=True,
+    allow_origins=CORS_ALLOW_ORIGINS,
+    allow_credentials="*" not in CORS_ALLOW_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -83,6 +99,82 @@ async def get_config():
         "db_engine": DB_ENGINE
     }
 
+
+def _coerce_chart_value(value):
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return value
+
+
+def _is_numeric_value(value) -> bool:
+    return isinstance(value, (Number, Decimal)) and not isinstance(value, bool)
+
+
+def _pick_column(row: dict, preferred: str | None = None, numeric: bool = False, exclude=None):
+    exclude = exclude or set()
+    if preferred and preferred in row and preferred not in exclude:
+        return preferred
+
+    for key, value in row.items():
+        if key in exclude:
+            continue
+        if not numeric or _is_numeric_value(value):
+            return key
+    return None
+
+
+def _build_chart_data(config: ChartConfiguration, rows: List[dict]) -> ChartData:
+    if not rows:
+        return ChartData(
+            labels=[],
+            datasets=[],
+            metadata={
+                "total_rows": 0,
+                "sql_executed": config.query_sql,
+                "execution_time_ms": 0,
+            },
+        )
+
+    first_row = rows[0]
+    x_key = _pick_column(first_row, config.x_axis) or next(iter(first_row.keys()))
+    labels = [str(_coerce_chart_value(row.get(x_key))) for row in rows]
+    datasets = []
+
+    y_key = _pick_column(first_row, config.y_axis, numeric=True, exclude={x_key})
+    if y_key:
+        datasets.append({
+            "label": y_key,
+            "data": [_coerce_chart_value(row.get(y_key)) for row in rows],
+            "backgroundColor": "rgba(54, 162, 235, 0.5)",
+            "borderColor": "rgba(54, 162, 235, 1)",
+            "borderWidth": 2
+        })
+    else:
+        for key, value in first_row.items():
+            if key == x_key or not _is_numeric_value(value):
+                continue
+            datasets.append({
+                "label": key,
+                "data": [_coerce_chart_value(row.get(key)) for row in rows],
+                "backgroundColor": (
+                    f"rgba({random.randint(50, 200)}, {random.randint(50, 200)}, "
+                    f"{random.randint(50, 200)}, 0.5)"
+                ),
+                "borderWidth": 1
+            })
+
+    return ChartData(
+        labels=labels,
+        datasets=datasets,
+        metadata={
+            "total_rows": len(rows),
+            "sql_executed": config.query_sql,
+            "execution_time_ms": 0,
+        }
+    )
+
 # =============================================================================
 # GENERACIÓN DE GRÁFICOS CON IA
 # =============================================================================
@@ -105,41 +197,7 @@ async def generate_chart(request: NaturalLanguageRequest):
         # Ejecutar la consulta SQL para obtener datos reales
         rows = await db_client.execute_query(config.query_sql)
         
-        # Transformar a formato de ChartData
-        labels = [str(row[config.x_axis or list(row.keys())[0]]) for row in rows] if rows else []
-        datasets = []
-        
-        if rows:
-            if config.y_axis:
-                values = [row[config.y_axis] for row in rows]
-                datasets.append({
-                    "label": config.y_axis,
-                    "data": values,
-                    "backgroundColor": "rgba(54, 162, 235, 0.5)",
-                    "borderColor": "rgba(54, 162, 235, 1)",
-                    "borderWidth": 2
-                })
-            else:
-                # Si no hay y_axis específico, usar todas las columnas numéricas
-                for key in rows[0].keys():
-                    if isinstance(rows[0][key], (int, float)) and key != config.x_axis:
-                        values = [row[key] for row in rows]
-                        datasets.append({
-                            "label": key,
-                            "data": values,
-                            "backgroundColor": f"rgba({random.randint(50, 200)}, {random.randint(50, 200)}, {random.randint(50, 200)}, 0.5)",
-                            "borderWidth": 1
-                        })
-        
-        chart_data = ChartData(
-            labels=labels,
-            datasets=datasets,
-            metadata={
-                "total_rows": len(rows),
-                "sql_executed": config.query_sql,
-                "execution_time_ms": 0  # Se podría medir
-            }
-        )
+        chart_data = _build_chart_data(config, rows)
         
         # Generar explicación
         explanation = f"""
@@ -160,6 +218,8 @@ async def generate_chart(request: NaturalLanguageRequest):
             suggestions=suggestions
         )
             
+    except UnsafeQueryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generando gráfico: {str(e)}")
 
@@ -172,9 +232,11 @@ async def execute_sql(config: ChartConfiguration):
         rows = await db_client.execute_query(config.query_sql)
         return {
             "success": True,
-            "data": rows,
+            "data": jsonable_encoder(rows),
             "row_count": len(rows)
         }
+    except UnsafeQueryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error en SQL: {str(e)}")
 

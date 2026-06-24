@@ -4,13 +4,17 @@ Cuadro de Mandos Hospitalario Profesional con Filtros Globales y soporte Multi-D
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import requests
 import json
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.offline import get_plotlyjs
 from datetime import datetime, timedelta
 import os
+import hashlib
+import html
 from streamlit_sortables import sort_items
 
 # ==============================================================================
@@ -25,21 +29,25 @@ st.set_page_config(
 
 # API del Backend
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
+SUPPORTED_DB_ENGINES = {"postgres", "mssql", "oracle"}
+DEFAULT_KPI_ORDER = [
+    "Volumen Urgencias", "Cirugías Programadas", "Consultas Totales", "Ocupación de Camas",
+    "Estancia Urgencias (ED LOS)", "Estancia Planta (ALOS)", "Utilización Quirófanos", "Demora Consultas"
+]
+DEFAULT_CHART_POSITIONS = {
+    "pos1": "Tendencia Histórica de Urgencias",
+    "pos2": "Distribución por Triaje",
+    "pos3": "Estado y Disponibilidad de Camas",
+    "pos4": "Demanda por Especialidad"
+}
+LAYOUT_OPTIONS = ["Grid 2x2", "Filas Verticales (1 col)", "3 Columnas Estrechas"]
 
 # Inicializar variables de diseño en session_state si no existen
 if 'kpi_order' not in st.session_state:
-    st.session_state.kpi_order = [
-        "Volumen Urgencias", "Cirugías Programadas", "Consultas Totales", "Ocupación de Camas",
-        "Estancia Urgencias (ED LOS)", "Estancia Planta (ALOS)", "Utilización Quirófanos", "Demora Consultas"
-    ]
+    st.session_state.kpi_order = list(DEFAULT_KPI_ORDER)
 
 if 'chart_positions' not in st.session_state:
-    st.session_state.chart_positions = {
-        "pos1": "Tendencia Histórica de Urgencias",
-        "pos2": "Distribución por Triaje",
-        "pos3": "Estado y Disponibilidad de Camas",
-        "pos4": "Demanda por Especialidad"
-    }
+    st.session_state.chart_positions = dict(DEFAULT_CHART_POSITIONS)
 
 if 'layout_grid' not in st.session_state:
     st.session_state.layout_grid = "Grid 2x2"
@@ -51,12 +59,17 @@ if 'edit_mode' not in st.session_state:
 PBI_COLORS = {
     "blue": "#007A53",          # Verde Corporativo SAS (Andalucía)
     "dark_blue": "#005236",     # Verde Oscuro SAS
+    "navy": "#12343B",          # Azul petroleo para contraste ejecutivo
+    "cyan": "#0F766E",          # Teal clinico para elementos secundarios
     "yellow": "#DDB827",        # Amarillo/Oro Junta de Andalucía
     "orange": "#E87722",        # Naranja de Acento
     "red": "#C62828",           # Rojo Alerta
     "teal": "#009F6B",          # Verde Claro SAS
     "grey": "#e2e8f0",          # Borde sutil gris claro
-    "light_grey": "#f8fafc",    # Fondo Gris/Azulado Claro
+    "line": "#d8dee8",          # Lineas divisorias
+    "light_grey": "#f4f7fb",    # Fondo Gris/Azulado Claro
+    "surface": "#fbfdff",       # Superficie elevada suave
+    "surface_alt": "#eef6f3",   # Superficie tintada clinica
     "white": "#FFFFFF",
     "text_dark": "#0f172a",     # Texto principal oscuro
     "text_muted": "#475569",    # Texto secundario atenuado
@@ -70,23 +83,42 @@ st.markdown(f"""
 <style>
     /* Fondo del canvas de la aplicación estilo SAS Andaluz */
     .stApp {{
-        background-color: {PBI_COLORS['light_grey']} !important;
+        background:
+            linear-gradient(180deg, #eef6f3 0%, {PBI_COLORS['light_grey']} 34%, #f8fafc 100%) !important;
         font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Roboto', sans-serif;
+    }}
+
+    .stApp::before {{
+        content: "";
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 4px;
+        background: linear-gradient(90deg, {PBI_COLORS['blue']} 0%, {PBI_COLORS['yellow']} 52%, {PBI_COLORS['orange']} 100%);
+        z-index: 999999;
+        pointer-events: none;
+    }}
+
+    [data-testid="stHeader"] {{
+        background: transparent !important;
     }}
     
     /* Contenedor principal */
     .main .block-container {{
-        padding-top: 1.5rem;
-        padding-left: 2rem;
-        padding-right: 2rem;
+        padding-top: 1.15rem;
+        padding-left: clamp(1rem, 2vw, 2rem);
+        padding-right: clamp(1rem, 2vw, 2rem);
         padding-bottom: 2rem;
+        max-width: 1680px;
     }}
     
     /* Sidebar moderno y limpio con fondo blanco para máxima legibilidad */
     section[data-testid="stSidebar"] {{
-        background-color: {PBI_COLORS['white']} !important;
-        border-right: 1px solid {PBI_COLORS['grey']} !important;
-        box-shadow: 4px 0 24px rgba(0, 75, 83, 0.02) !important;
+        background:
+            linear-gradient(180deg, #ffffff 0%, #fbfdff 48%, #f4f7fb 100%) !important;
+        border-right: 1px solid {PBI_COLORS['line']} !important;
+        box-shadow: 8px 0 30px rgba(15, 52, 59, 0.06) !important;
     }}
     
     /* Ocultar la cabecera por defecto de Streamlit en la barra lateral */
@@ -110,18 +142,18 @@ st.markdown(f"""
     
     /* Estilo de los botones del menú lateral */
     [data-testid="stSidebar"] [data-testid="stRadio"] [role="radiogroup"] label {{
-        background-color: #f8fafc !important;
+        background-color: {PBI_COLORS['surface']} !important;
         color: {PBI_COLORS['text_dark']} !important;
-        padding: 14px 18px !important;
-        border-radius: 10px !important;
-        border: 1px solid #e2e8f0 !important;
+        padding: 12px 14px !important;
+        border-radius: 8px !important;
+        border: 1px solid {PBI_COLORS['line']} !important;
         transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
         margin-bottom: 4px !important;
         cursor: pointer !important;
         display: flex !important;
         align-items: center !important;
         width: 100% !important;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.02) !important;
+        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.025) !important;
     }}
     
     /* Texto de los botones del menú */
@@ -143,9 +175,9 @@ st.markdown(f"""
     
     /* Pestaña/Botón Activo - Estilo Corporativo SAS Verde y Blanco */
     [data-testid="stSidebar"] [data-testid="stRadio"] [role="radiogroup"] label[data-checked="true"] {{
-        background-color: {PBI_COLORS['blue']} !important;
+        background: linear-gradient(135deg, {PBI_COLORS['blue']} 0%, {PBI_COLORS['navy']} 100%) !important;
         border-color: {PBI_COLORS['blue']} !important;
-        box-shadow: 0 6px 20px rgba(0, 122, 83, 0.25) !important;
+        box-shadow: 0 8px 18px rgba(0, 82, 54, 0.22) !important;
         transform: translateY(-1.5px) !important;
     }}
     
@@ -169,13 +201,13 @@ st.markdown(f"""
     
     /* Caja elegante del estado de conexión */
     .connection-status-box {{
-        background-color: #f8fafc;
+        background-color: {PBI_COLORS['surface']};
         padding: 14px;
-        border-radius: 10px;
-        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        border: 1px solid {PBI_COLORS['line']};
         border-left: 4px solid {PBI_COLORS['blue']};
         margin-top: 10px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.01);
+        box-shadow: 0 8px 18px rgba(15, 52, 59, 0.04);
     }}
     
     /* Separador sutil */
@@ -211,19 +243,22 @@ st.markdown(f"""
     
     /* Tarjetas de Métricas (KPI Cards) SAS */
     .kpi-card-pbi {{
-        background-color: {PBI_COLORS['white']};
-        border: 1px solid {PBI_COLORS['grey']};
-        border-radius: 6px;
-        padding: 18px 22px;
-        box-shadow: 0 4px 16px rgba(0, 75, 83, 0.03);
+        background: linear-gradient(180deg, #ffffff 0%, {PBI_COLORS['surface']} 100%);
+        border: 1px solid {PBI_COLORS['line']};
+        border-radius: 8px;
+        padding: 16px 18px;
+        box-shadow: 0 10px 24px rgba(15, 52, 59, 0.055);
         margin-bottom: 16px;
         text-align: left;
         transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+        min-height: 148px;
+        overflow: hidden;
+        position: relative;
     }}
     
     .kpi-card-pbi:hover {{
         transform: translateY(-2px);
-        box-shadow: 0 8px 24px rgba(0, 122, 83, 0.08);
+        box-shadow: 0 14px 32px rgba(0, 82, 54, 0.12);
         border-color: {PBI_COLORS['blue']};
     }}
     
@@ -237,11 +272,12 @@ st.markdown(f"""
     }}
     
     .kpi-value-pbi {{
-        font-size: 34px;
+        font-size: clamp(26px, 2vw, 34px);
         color: {PBI_COLORS['text_dark']};
-        font-weight: 700;
+        font-weight: 800;
         margin-bottom: 4px;
         line-height: 1.1;
+        letter-spacing: 0;
     }}
     
     .kpi-subtitle-pbi {{
@@ -256,11 +292,25 @@ st.markdown(f"""
     /* Contenedores de gráficos SAS */
     .visual-card-pbi {{
         background-color: {PBI_COLORS['white']};
-        border: 1px solid {PBI_COLORS['grey']};
-        border-radius: 6px;
-        padding: 20px;
-        box-shadow: 0 4px 16px rgba(0, 75, 83, 0.03);
+        border: 1px solid {PBI_COLORS['line']};
+        border-radius: 8px;
+        padding: 18px;
+        box-shadow: 0 10px 26px rgba(15, 52, 59, 0.055);
         margin-bottom: 20px;
+        min-height: 360px;
+    }}
+
+    .visual-card-pbi:empty {{
+        display: none;
+    }}
+
+    [data-testid="stPlotlyChart"] {{
+        background-color: {PBI_COLORS['white']};
+        border: 1px solid {PBI_COLORS['line']};
+        border-radius: 8px;
+        padding: 10px 10px 2px 10px;
+        box-shadow: 0 10px 26px rgba(15, 52, 59, 0.055);
+        margin-bottom: 10px;
     }}
     
     .visual-title-pbi {{
@@ -274,19 +324,178 @@ st.markdown(f"""
         justify-content: space-between;
         align-items: center;
         letter-spacing: 0.2px;
+        gap: 8px;
+    }}
+
+    .visual-title-pbi::before {{
+        content: "";
+        width: 4px;
+        height: 18px;
+        border-radius: 4px;
+        background: linear-gradient(180deg, {PBI_COLORS['blue']}, {PBI_COLORS['yellow']});
+        display: inline-block;
+        flex: 0 0 auto;
     }}
     
     /* Cabecera del Reporte SAS */
     .report-header-pbi {{
-        background-color: {PBI_COLORS['white']};
-        border: 1px solid {PBI_COLORS['grey']};
-        border-radius: 6px;
-        padding: 16px 24px;
+        background:
+            linear-gradient(135deg, {PBI_COLORS['navy']} 0%, {PBI_COLORS['blue']} 70%, {PBI_COLORS['cyan']} 100%);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 8px;
+        padding: 18px 22px;
         margin-bottom: 20px;
-        box-shadow: 0 4px 16px rgba(0, 75, 83, 0.03);
+        box-shadow: 0 14px 36px rgba(0, 82, 54, 0.18);
         display: flex;
         justify-content: space-between;
         align-items: center;
+        gap: 20px;
+        color: white;
+    }}
+
+    .report-title-pbi {{
+        margin: 0;
+        font-size: clamp(21px, 2vw, 30px);
+        color: #ffffff;
+        font-weight: 800;
+        letter-spacing: 0;
+        line-height: 1.12;
+    }}
+
+    .report-subtitle-pbi {{
+        margin: 6px 0 0 0;
+        color: rgba(255,255,255,0.82);
+        font-size: 12.5px;
+        font-weight: 500;
+    }}
+
+    .header-actions-pbi {{
+        display: flex;
+        align-items: flex-end;
+        justify-content: flex-end;
+        gap: 8px;
+        flex-wrap: wrap;
+    }}
+
+    .status-pill-pbi,
+    .updated-pill-pbi {{
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        border-radius: 8px;
+        padding: 7px 10px;
+        font-size: 11px;
+        font-weight: 800;
+        border: 1px solid rgba(255,255,255,0.22);
+        background: rgba(255,255,255,0.13);
+        color: white;
+        backdrop-filter: blur(8px);
+        white-space: nowrap;
+    }}
+
+    .status-dot-pbi {{
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background-color: #8fe6b7;
+        box-shadow: 0 0 0 3px rgba(143,230,183,0.18);
+    }}
+
+    .filter-panel-pbi {{
+        background-color: rgba(255,255,255,0.92);
+        border: 1px solid {PBI_COLORS['line']};
+        border-radius: 8px;
+        padding: 12px 16px;
+        margin-bottom: 12px;
+        box-shadow: 0 10px 24px rgba(15, 52, 59, 0.05);
+    }}
+
+    .filter-title-pbi {{
+        color: {PBI_COLORS['text_dark']};
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+        margin-bottom: 3px;
+    }}
+
+    .filter-caption-pbi {{
+        color: {PBI_COLORS['text_muted']};
+        font-size: 12px;
+        font-weight: 500;
+    }}
+
+    .sidebar-summary-pbi {{
+        background: linear-gradient(180deg, #ffffff 0%, {PBI_COLORS['surface']} 100%);
+        border: 1px solid {PBI_COLORS['line']};
+        border-radius: 8px;
+        padding: 12px;
+        margin: 8px 0 12px 0;
+        box-shadow: 0 8px 18px rgba(15, 52, 59, 0.045);
+    }}
+
+    .sidebar-summary-title-pbi {{
+        color: {PBI_COLORS['text_dark']};
+        font-size: 12px;
+        font-weight: 800;
+        margin-bottom: 4px;
+    }}
+
+    .sidebar-summary-text-pbi {{
+        color: {PBI_COLORS['text_muted']};
+        font-size: 11.5px;
+        line-height: 1.4;
+        margin-bottom: 10px;
+    }}
+
+    .sidebar-stat-row-pbi {{
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+    }}
+
+    .sidebar-stat-pbi {{
+        background-color: {PBI_COLORS['surface_alt']};
+        color: {PBI_COLORS['blue']};
+        border: 1px solid rgba(0, 122, 83, 0.14);
+        border-radius: 7px;
+        padding: 5px 8px;
+        font-size: 10.5px;
+        font-weight: 800;
+        white-space: nowrap;
+    }}
+
+    div[data-testid="stDateInput"] label p,
+    div[data-testid="stMultiSelect"] label p {{
+        color: {PBI_COLORS['text_dark']} !important;
+        font-size: 12px !important;
+        font-weight: 700 !important;
+    }}
+
+    .stDownloadButton button,
+    .stButton button {{
+        border-radius: 8px !important;
+        border: 1px solid {PBI_COLORS['line']} !important;
+        font-weight: 700 !important;
+        min-height: 36px !important;
+    }}
+
+    .stDownloadButton button {{
+        background-color: {PBI_COLORS['surface_alt']} !important;
+        color: {PBI_COLORS['blue']} !important;
+    }}
+
+    @media (max-width: 900px) {{
+        .report-header-pbi {{
+            align-items: flex-start;
+            flex-direction: column;
+        }}
+        .header-actions-pbi {{
+            justify-content: flex-start;
+        }}
+        .visual-card-pbi {{
+            min-height: auto;
+        }}
     }}
     
     /* Estilo del Chat IA */
@@ -311,8 +520,10 @@ def fetch_backend_config():
     try:
         response = requests.get(f"{API_URL}/api/v1/config", timeout=5)
         if response.status_code == 200:
-            return response.json().get("db_engine", "postgres")
-    except:
+            engine = response.json().get("db_engine", "postgres").lower()
+            if engine in SUPPORTED_DB_ENGINES:
+                return engine
+    except (requests.RequestException, ValueError):
         pass
     return "postgres"
 
@@ -334,6 +545,11 @@ def run_query(sql_query: str):
         if response.status_code == 200:
             data = response.json().get("data", [])
             return pd.DataFrame(data)
+        try:
+            detail = response.json().get("detail", response.text)
+        except ValueError:
+            detail = response.text
+        st.error(f"Error ejecutando consulta: {detail}")
     except Exception as e:
         st.error(f"Error conectando con la base de datos: {e}")
     return pd.DataFrame()
@@ -453,6 +669,10 @@ SQL_TEMPLATES = {
 # ==============================================================================
 # CONSTRUCCIÓN DE FILTROS DINÁMICOS
 # ==============================================================================
+def sql_literal(value) -> str:
+    return str(value).replace("'", "''")
+
+
 def get_filters_clause(date_col="fecha_entrada", add_specialty=False, add_triage=False):
     """Construye la cláusula WHERE compatible con el motor seleccionado"""
     clauses = ["1=1"]
@@ -467,7 +687,7 @@ def get_filters_clause(date_col="fecha_entrada", add_specialty=False, add_triage
             
     # Filtro de especialidades
     if add_specialty and 'selected_specs' in st.session_state and st.session_state.selected_specs:
-        specs_str = ", ".join([f"'{s}'" for s in st.session_state.selected_specs])
+        specs_str = ", ".join([f"'{sql_literal(s)}'" for s in st.session_state.selected_specs])
         clauses.append(f"especialidad IN ({specs_str})")
         
     # Filtro de triaje
@@ -509,51 +729,37 @@ with st.sidebar:
     )
     
     st.markdown("---")
-    st.markdown("### ⚙️ CONFIGURAR DISEÑO (LAYOUT)")
-    
-    with st.expander("🛠️ Personalizar Cuadro de Mandos", expanded=False):
-        st.markdown("**1. Reordenar y Mostrar KPIs:**")
-        kpi_options = [
-            "Volumen Urgencias", "Cirugías Programadas", "Consultas Totales", "Ocupación de Camas",
-            "Estancia Urgencias (ED LOS)", "Estancia Planta (ALOS)", "Utilización Quirófanos", "Demora Consultas"
-        ]
-        selected_kpis = st.multiselect(
-            "Selecciona y ordena KPIs:",
-            options=kpi_options,
-            default=st.session_state.kpi_order,
-            key="kpi_order_input"
-        )
-        if selected_kpis:
-            st.session_state.kpi_order = selected_kpis
-            
-        st.markdown("---")
-        st.markdown("**2. Reubicar / Mover Gráficos:**")
-        chart_options = [
-            "Tendencia Histórica de Urgencias", 
-            "Distribución por Triaje", 
-            "Estado y Disponibilidad de Camas", 
-            "Demanda por Especialidad"
-        ]
-        
-        c_pos1 = st.selectbox("Posición 1 (Sup. Izq.):", options=chart_options, index=chart_options.index(st.session_state.chart_positions["pos1"]), key="sel_pos1")
-        c_pos2 = st.selectbox("Posición 2 (Sup. Der.):", options=chart_options, index=chart_options.index(st.session_state.chart_positions["pos2"]), key="sel_pos2")
-        c_pos3 = st.selectbox("Posición 3 (Inf. Izq.):", options=chart_options, index=chart_options.index(st.session_state.chart_positions["pos3"]), key="sel_pos3")
-        c_pos4 = st.selectbox("Posición 4 (Inf. Der.):", options=chart_options, index=chart_options.index(st.session_state.chart_positions["pos4"]), key="sel_pos4")
-        
-        st.session_state.chart_positions["pos1"] = c_pos1
-        st.session_state.chart_positions["pos2"] = c_pos2
-        st.session_state.chart_positions["pos3"] = c_pos3
-        st.session_state.chart_positions["pos4"] = c_pos4
-        
-        st.markdown("---")
-        st.markdown("**3. Distribución de Pantalla:**")
-        grid_sel = st.radio(
-            "Distribución:",
-            ["Grid 2x2", "Filas Verticales (1 col)", "3 Columnas Estrechas"],
-            index=["Grid 2x2", "Filas Verticales (1 col)", "3 Columnas Estrechas"].index(st.session_state.layout_grid),
-            key="sel_grid"
+    st.markdown("### ⚙️ VISTA DEL DASHBOARD")
+
+    with st.expander("Diseño del dashboard", expanded=False):
+        st.markdown(f"""
+        <div class='sidebar-summary-pbi'>
+            <div class='sidebar-summary-title-pbi'>Controles rápidos</div>
+            <div class='sidebar-summary-text-pbi'>
+                La reordenación detallada de KPIs y gráficos vive dentro del dashboard al activar el modo edición.
+            </div>
+            <div class='sidebar-stat-row-pbi'>
+                <span class='sidebar-stat-pbi'>{len(st.session_state.kpi_order)} KPIs activos</span>
+                <span class='sidebar-stat-pbi'>{len(st.session_state.chart_positions)} gráficos</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        grid_sel = st.selectbox(
+            "Distribución",
+            options=LAYOUT_OPTIONS,
+            index=LAYOUT_OPTIONS.index(st.session_state.layout_grid),
+            key="sidebar_layout_grid",
+            help="Cambia la forma en que se organizan los gráficos del dashboard principal."
         )
         st.session_state.layout_grid = grid_sel
+
+        if st.button("Restablecer diseño", key="btn_reset_dashboard_layout", use_container_width=True):
+            st.session_state.kpi_order = list(DEFAULT_KPI_ORDER)
+            st.session_state.chart_positions = dict(DEFAULT_CHART_POSITIONS)
+            st.session_state.layout_grid = "Grid 2x2"
+            st.session_state.edit_mode = False
+            st.rerun()
     
     st.markdown("---")
     st.markdown("### 🔌 ESTADO DE LA CONEXIÓN")
@@ -579,33 +785,31 @@ with st.sidebar:
 # ==============================================================================
 # REPORTE PRINCIPAL Y CABECERA
 # ==============================================================================
-# Cabecera al estilo SAS Visual Analytics
-col_head1, col_head2 = st.columns([7, 3])
-with col_head1:
-    st.markdown(f"""
-    <div style='margin-bottom: 10px;'>
-        <h1 style='margin: 0; font-size: 22px; color: {PBI_COLORS['text_dark']}; font-weight: 700;'>
-            {page.split(" ", 1)[1] if " " in page else page}
-        </h1>
-        <p style='margin: 0; font-size: 12px; color: {PBI_COLORS['text_muted']}; font-weight: 500;'>
-            Conexión de datos en vivo desde el servidor central hospitalario
+page_title = page.split(" ", 1)[1] if " " in page else page
+st.markdown(f"""
+<section class='report-header-pbi'>
+    <div>
+        <h1 class='report-title-pbi'>{page_title}</h1>
+        <p class='report-subtitle-pbi'>
+            Cuadro de mando operativo con datos en vivo del servidor hospitalario.
         </p>
     </div>
-    """, unsafe_allow_html=True)
-
-with col_head2:
-    st.markdown(f"""
-    <div style='text-align: right; background-color: {PBI_COLORS['light_grey']}; padding: 6px 14px; border-radius: 6px; font-size: 11px; font-weight: bold; border: 1px solid {PBI_COLORS['grey']}; display: inline-block; float: right; margin-bottom: 8px;'>
-        📝 Último Refresco: {datetime.now().strftime('%H:%M:%S')}
+    <div class='header-actions-pbi'>
+        <span class='status-pill-pbi'><span class='status-dot-pbi'></span>{db_engine.upper()} conectado</span>
+        <span class='updated-pill-pbi'>Actualizado {datetime.now().strftime('%H:%M:%S')}</span>
     </div>
-    """, unsafe_allow_html=True)
-    
-    # Render the edit mode toggle only on the main dashboard page
-    if "Dashboard" in page:
+</section>
+""", unsafe_allow_html=True)
+
+# Render the edit mode toggle only on the main dashboard page
+if "Dashboard" in page:
+    col_edit_toggle, col_edit_space = st.columns([1, 4])
+    with col_edit_toggle:
         edit_mode = st.toggle(
-            "🔓 Modo Edición de Diseño", 
-            value=st.session_state.edit_mode, 
-            key="page_edit_mode_toggle"
+            "Modo Edicion",
+            value=st.session_state.edit_mode,
+            key="page_edit_mode_toggle",
+            help="Activa controles para reordenar KPIs y graficos"
         )
         st.session_state.edit_mode = edit_mode
 
@@ -616,9 +820,10 @@ with col_head2:
 if "Asistente" not in page:
     with st.container():
         st.markdown(f"""
-        <div style='background-color: white; border: 1px solid {PBI_COLORS['grey']}; border-radius: 4px; padding: 12px 18px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);'>
-            <div style='font-size: 11px; font-weight: bold; color: {PBI_COLORS['text_muted']}; margin-bottom: 8px; text-transform: uppercase;'>
-                ⚡ SEGMENTADORES DE DATOS GLOBALES (FILTROS DE REPORTE)
+        <div class='filter-panel-pbi'>
+            <div class='filter-title-pbi'>Segmentadores globales</div>
+            <div class='filter-caption-pbi'>
+                Ajusta periodo, especialidad y triaje para recalcular KPIs y visualizaciones.
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -651,17 +856,285 @@ if "Asistente" not in page:
     st.markdown("<br>", unsafe_allow_html=True)
 
 # Helper para renderizar botón de exportación CSV
+DOWNLOAD_KEY_COUNTS = {}
+
+
 def render_csv_download_button(df: pd.DataFrame, file_name: str, key_val: str):
     """Renderiza un botón discreto de descarga CSV estilo Power BI 'Export Data'"""
     if not df.empty:
+        key_count = DOWNLOAD_KEY_COUNTS.get(key_val, 0)
+        DOWNLOAD_KEY_COUNTS[key_val] = key_count + 1
+        unique_key = key_val if key_count == 0 else f"{key_val}_{key_count}"
         csv_data = df.to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="📥 Exportar Datos",
+            label="Exportar CSV",
             data=csv_data,
             file_name=f"{file_name}.csv",
             mime="text/csv",
-            key=key_val
+            key=unique_key
         )
+
+
+@st.cache_resource
+def load_plotly_js_bundle():
+    return get_plotlyjs()
+
+
+def render_double_click_chart(fig, df: pd.DataFrame, title: str, key_val: str, sql_query: str = ""):
+    """Renderiza un grafico Plotly con panel de detalle al hacer doble click."""
+    safe_key = hashlib.md5(key_val.encode("utf-8")).hexdigest()
+    chart_id = f"chart_{safe_key}"
+    detail_id = f"detail_{safe_key}"
+    hint_id = f"hint_{safe_key}"
+    close_id = f"close_{safe_key}"
+
+    detail_df = df.head(12).copy()
+    for col in detail_df.columns:
+        if pd.api.types.is_datetime64_any_dtype(detail_df[col]):
+            detail_df[col] = detail_df[col].dt.strftime("%Y-%m-%d %H:%M")
+
+    rows_count = len(df)
+    columns_count = len(df.columns)
+    numeric_summary = []
+    for column in df.select_dtypes(include="number").columns[:4]:
+        numeric_summary.append(
+            f"<span class='detail-chip'>{html.escape(str(column))}: {df[column].sum():,.0f}</span>"
+        )
+
+    if numeric_summary:
+        summary_html = "".join(numeric_summary)
+    else:
+        summary_html = "<span class='detail-chip'>Sin métricas numéricas</span>"
+
+    table_html = detail_df.to_html(index=False, classes="detail-table", border=0)
+    sql_html = html.escape(sql_query.strip()) if sql_query else "Consulta no disponible"
+    title_html = html.escape(title)
+
+    fig_html = fig.to_html(
+        include_plotlyjs=False,
+        full_html=False,
+        div_id=chart_id,
+        config={
+            "displayModeBar": False,
+            "responsive": True,
+            "doubleClick": False,
+        },
+    )
+
+    component_html = f"""
+    <style>
+        body {{
+            margin: 0;
+            background: transparent;
+            font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+            color: #0f172a;
+        }}
+        .chart-shell {{
+            position: relative;
+            background: #ffffff;
+            border: 1px solid #d8dee8;
+            border-radius: 8px;
+            padding: 10px 10px 12px 10px;
+            box-shadow: 0 10px 26px rgba(15, 52, 59, 0.055);
+            min-height: 386px;
+        }}
+        .chart-hint {{
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            margin: 2px 0 8px 4px;
+            padding: 5px 8px;
+            border-radius: 7px;
+            background: #eef6f3;
+            color: #007A53;
+            font-size: 11px;
+            font-weight: 800;
+            border: 1px solid rgba(0, 122, 83, 0.14);
+            user-select: none;
+        }}
+        .detail-panel {{
+            display: none;
+            position: absolute;
+            z-index: 20;
+            left: 10px;
+            right: 10px;
+            top: 46px;
+            bottom: 10px;
+            overflow: auto;
+            background: rgba(255,255,255,0.98);
+            border: 1px solid #d8dee8;
+            border-radius: 8px;
+            padding: 12px;
+            box-shadow: 0 18px 40px rgba(15, 52, 59, 0.18);
+        }}
+        .detail-panel.open {{
+            display: block;
+        }}
+        .detail-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 12px;
+            margin-bottom: 10px;
+        }}
+        .detail-title {{
+            font-size: 13px;
+            font-weight: 800;
+            color: #0f172a;
+            margin-bottom: 4px;
+        }}
+        .detail-subtitle {{
+            font-size: 11.5px;
+            color: #475569;
+        }}
+        .detail-close {{
+            border: 1px solid #d8dee8;
+            background: #fbfdff;
+            border-radius: 7px;
+            color: #475569;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 800;
+            padding: 5px 8px;
+        }}
+        .detail-chip-row {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 10px;
+        }}
+        .detail-chip {{
+            display: inline-flex;
+            border: 1px solid rgba(0, 122, 83, 0.14);
+            background: #eef6f3;
+            color: #007A53;
+            border-radius: 7px;
+            padding: 5px 8px;
+            font-size: 11px;
+            font-weight: 800;
+        }}
+        .detail-table-wrap {{
+            overflow: auto;
+            max-height: 145px;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+        }}
+        table.detail-table {{
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+        }}
+        .detail-table th {{
+            background: #f4f7fb;
+            color: #0f172a;
+            font-weight: 800;
+            text-align: left;
+            padding: 7px 8px;
+            border-bottom: 1px solid #e2e8f0;
+            white-space: nowrap;
+        }}
+        .detail-table td {{
+            padding: 7px 8px;
+            border-bottom: 1px solid #eef2f7;
+            color: #334155;
+            white-space: nowrap;
+        }}
+        details.sql-detail {{
+            margin-top: 10px;
+            font-size: 11.5px;
+            color: #475569;
+        }}
+        details.sql-detail summary {{
+            cursor: pointer;
+            font-weight: 800;
+            color: #007A53;
+        }}
+        .sql-box {{
+            margin-top: 8px;
+            white-space: pre-wrap;
+            background: #0f172a;
+            color: #e2e8f0;
+            border-radius: 8px;
+            padding: 10px;
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 10.5px;
+            line-height: 1.45;
+            max-height: 100px;
+            overflow: auto;
+        }}
+    </style>
+    <script>{load_plotly_js_bundle()}</script>
+    <div class="chart-shell">
+        <div id="{hint_id}" class="chart-hint">Doble clic para ver detalles</div>
+        {fig_html}
+        <section id="{detail_id}" class="detail-panel" aria-live="polite">
+            <div class="detail-header">
+                <div>
+                    <div class="detail-title">Detalle de {title_html}</div>
+                    <div class="detail-subtitle">Vista preliminar de datos, totales y consulta usada.</div>
+                </div>
+                <button id="{close_id}" class="detail-close" type="button">Cerrar</button>
+            </div>
+            <div class="detail-chip-row">
+                <span class="detail-chip">{rows_count:,} filas</span>
+                <span class="detail-chip">{columns_count} columnas</span>
+                {summary_html}
+            </div>
+            <div class="detail-table-wrap">{table_html}</div>
+            <details class="sql-detail">
+                <summary>Ver SQL ejecutado</summary>
+                <div class="sql-box">{sql_html}</div>
+            </details>
+        </section>
+    </div>
+    <script>
+        const chart = document.getElementById("{chart_id}");
+        const detail = document.getElementById("{detail_id}");
+        const hint = document.getElementById("{hint_id}");
+        const closeButton = document.getElementById("{close_id}");
+        let lastToggleAt = 0;
+        function setHintText() {{
+            if (hint && detail) {{
+                hint.textContent = detail.classList.contains("open")
+                    ? "Detalles visibles"
+                    : "Doble clic para ver detalles";
+            }}
+        }}
+        function toggleDetailPanel(event) {{
+            if (event && event.preventDefault) {{
+                event.preventDefault();
+            }}
+            const now = Date.now();
+            if (now - lastToggleAt < 450) {{
+                return;
+            }}
+            lastToggleAt = now;
+            if (detail) {{
+                detail.classList.toggle("open");
+                setHintText();
+            }}
+        }}
+        function closeDetailPanel(event) {{
+            if (event && event.preventDefault) {{
+                event.preventDefault();
+            }}
+            if (detail) {{
+                detail.classList.remove("open");
+                setHintText();
+            }}
+        }}
+        if (chart) {{
+            chart.addEventListener("dblclick", toggleDetailPanel, true);
+            if (typeof chart.on === "function") {{
+                chart.on("plotly_doubleclick", toggleDetailPanel);
+            }}
+        }}
+        if (closeButton) {{
+            closeButton.addEventListener("click", closeDetailPanel);
+        }}
+    </script>
+    """
+    components.html(component_html, height=430, scrolling=False)
 
 # ==============================================================================
 # PÁGINA 1: DASHBOARD PRINCIPAL
@@ -901,7 +1374,7 @@ if "Dashboard" in page:
             </div>"""
         }
         
-        st.markdown("<div style='font-size: 11px; font-weight: bold; color: #475569; margin-top: 5px; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px;'>🎯 Cuadro de Mando de Indicadores (Organización Personalizada)</div>", unsafe_allow_html=True)
+        st.markdown("<div class='filter-title-pbi' style='margin: 8px 0 12px 0;'>Cuadro de mando de indicadores</div>", unsafe_allow_html=True)
         for chunk in kpi_chunks:
             cols = st.columns(len(chunk))
             for i, kpi_name in enumerate(chunk):
@@ -990,7 +1463,10 @@ if "Dashboard" in page:
                 )
                 fig.update_xaxes(showgrid=True, gridcolor='#e2e8f0', linecolor='#cbd5e1')
                 fig.update_yaxes(showgrid=True, gridcolor='#e2e8f0', linecolor='#cbd5e1')
-                st.plotly_chart(fig, use_container_width=True)
+                render_double_click_chart(
+                    fig, df_trend, "Tendencia Histórica de Urgencias",
+                    f"detail_trend_{pos_id}", q_trend
+                )
                 render_csv_download_button(df_trend, "tendencia_urgencias", f"csv_dash_trend_dyn_{pos_id}")
             else:
                 st.info("Sin registros.")
@@ -1039,7 +1515,10 @@ if "Dashboard" in page:
                 )
                 fig.update_xaxes(showgrid=False, linecolor='#cbd5e1')
                 fig.update_yaxes(showgrid=True, gridcolor='#e2e8f0', linecolor='#cbd5e1')
-                st.plotly_chart(fig, use_container_width=True)
+                render_double_click_chart(
+                    fig, df_triaje, "Distribución de Pacientes por Triaje",
+                    f"detail_triaje_{pos_id}", q_triaje
+                )
                 render_csv_download_button(df_triaje, "distribucion_triaje", f"csv_dash_triaje_dyn_{pos_id}")
             else:
                 st.info("Sin registros.")
@@ -1080,7 +1559,10 @@ if "Dashboard" in page:
                     height=260,
                     legend=dict(orientation="h", y=-0.1)
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                render_double_click_chart(
+                    fig, df_camas_pie, "Estado y Disponibilidad de Camas",
+                    f"detail_camas_{pos_id}", q_camas_pie
+                )
                 render_csv_download_button(df_camas_pie, "estado_camas", f"csv_dash_camas_dyn_{pos_id}")
             else:
                 st.info("Sin registros.")
@@ -1117,7 +1599,10 @@ if "Dashboard" in page:
                 )
                 fig.update_yaxes(autorange="reversed")
                 fig.update_xaxes(showgrid=True, gridcolor='#e2e8f0', linecolor='#cbd5e1')
-                st.plotly_chart(fig, use_container_width=True)
+                render_double_click_chart(
+                    fig, df_esp, "Demanda de Consultas por Especialidad",
+                    f"detail_especialidad_{pos_id}", q_esp
+                )
                 render_csv_download_button(df_esp, "consultas_especialidad", f"csv_dash_esp_dyn_{pos_id}")
             else:
                 st.info("Sin registros.")

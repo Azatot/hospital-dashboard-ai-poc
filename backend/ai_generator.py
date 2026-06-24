@@ -12,7 +12,7 @@ from db_connector import DB_ENGINE
 
 # Configuración de IA
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-DEFAULT_MODEL = "deepseek/deepseek-v4-flash:free"
+DEFAULT_MODEL = os.getenv("AI_MODEL", "deepseek/deepseek-v4-flash:free")
 
 # Esquema de la base de datos para contexto
 DB_SCHEMA = """
@@ -194,6 +194,13 @@ Tu respuesta debe ser JSON con el siguiente formato:
     "explanation": "Explicación en lenguaje natural de qué muestra el gráfico",
     "confidence": 0.95
 }}"""
+
+    def _parse_ai_json(self, content: str) -> Dict[str, Any]:
+        """Parsea respuestas JSON aunque el modelo las envuelva en markdown."""
+        cleaned = content.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE | re.DOTALL).strip()
+        return json.loads(cleaned)
     
     async def generate_chart_config(self, user_query: str) -> ChartConfiguration:
         """Genera configuración de gráfico usando IA"""
@@ -225,8 +232,14 @@ Tu respuesta debe ser JSON con el siguiente formato:
                     timeout=30.0
                 )
                 
+                response.raise_for_status()
                 data = response.json()
-                ai_response = json.loads(data["choices"][0]["message"]["content"])
+                choices = data.get("choices") or []
+                content = choices[0].get("message", {}).get("content") if choices else None
+                if not content:
+                    raise ValueError("La respuesta de IA no contiene contenido.")
+
+                ai_response = self._parse_ai_json(content)
                 
                 return ChartConfiguration(
                     chart_type=ChartType(ai_response.get("chart_type", "line")),

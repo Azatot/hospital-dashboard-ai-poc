@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS urgencias (
     destino VARCHAR(50), -- 'ALTA', 'INGRESO', 'FALLECIMIENTO', 'FUGA'
     box INTEGER,
     tiempo_espera_minutos INTEGER GENERATED ALWAYS AS (
-        EXTRACT(EPOCH FROM (fecha_atencion_medica - fecha_entrada))/60
+        (EXTRACT(EPOCH FROM (fecha_atencion_medica - fecha_entrada))/60)::INTEGER
     ) STORED
 );
 
@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS cirugias (
     tipo_cirugia VARCHAR(100),
     cirujano VARCHAR(100),
     duracion_minutos INTEGER GENERATED ALWAYS AS (
-        EXTRACT(EPOCH FROM (hora_fin - hora_inicio_real))/60
+        (EXTRACT(EPOCH FROM (hora_fin - hora_inicio_real))/60)::INTEGER
     ) STORED,
     estado VARCHAR(30), -- 'COMPLETADA', 'CANCELADA', 'EN_CURSO', 'PROGRAMADA'
     motivo_cancelacion VARCHAR(200)
@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS camas (
 );
 
 -- Índices para rendimiento
-CREATE INDEX idx_urgencias_fecha ON urgencias(fecha_entrada);
-CREATE INDEX idx_cirugias_fecha ON cirugias(fecha_programada);
-CREATE INDEX idx_consultas_fecha ON consultas_externas(fecha_cita);
-CREATE INDEX idx_camas_servicio ON camas(servicio);
+CREATE INDEX IF NOT EXISTS idx_urgencias_fecha ON urgencias(fecha_entrada);
+CREATE INDEX IF NOT EXISTS idx_cirugias_fecha ON cirugias(fecha_programada);
+CREATE INDEX IF NOT EXISTS idx_consultas_fecha ON consultas_externas(fecha_cita);
+CREATE INDEX IF NOT EXISTS idx_camas_servicio ON camas(servicio);
